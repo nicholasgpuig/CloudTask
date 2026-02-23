@@ -1,7 +1,6 @@
 package com.cloudtask.jobservice.integration;
 
 import com.cloudtask.jobservice.dto.AuthResponse;
-import com.cloudtask.jobservice.dto.CreateJobRequest;
 import com.cloudtask.jobservice.dto.RegisterRequest;
 import com.cloudtask.jobservice.messaging.JobPublisher;
 import com.cloudtask.jobservice.model.Job;
@@ -84,12 +83,14 @@ class JobControllerIntegrationTest {
 
     @Test
     void createJob_authenticated_success() throws Exception {
-        var request = new CreateJobRequest("sleep", "{\"seconds\":5}");
+        String requestJson = """
+                {"type": "sleep", "payload": {"seconds": 5}}
+                """;
 
         mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + userToken)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(request)))
+                        .content(requestJson))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.id").isNotEmpty())
                 .andExpect(jsonPath("$.type").value("sleep"))
@@ -101,33 +102,39 @@ class JobControllerIntegrationTest {
 
     @Test
     void createJob_noToken_returns403() throws Exception {
-        var request = new CreateJobRequest("sleep", "{\"seconds\":5}");
+        String requestJson = """
+                {"type": "sleep", "payload": {"seconds": 5}}
+                """;
 
         mockMvc.perform(post("/jobs")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(request)))
+                        .content(requestJson))
                 .andExpect(status().isForbidden());
     }
 
     @Test
     void createJob_invalidToken_returns401() throws Exception {
-        var request = new CreateJobRequest("sleep", "{\"seconds\":5}");
+        String requestJson = """
+                {"type": "sleep", "payload": {"seconds": 5}}
+                """;
 
         mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer invalid.token.here")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(request)))
+                        .content(requestJson))
                 .andExpect(status().isUnauthorized());
     }
 
     @Test
     void getJob_ownJob_success() throws Exception {
         // Create a job first
-        var createRequest = new CreateJobRequest("sleep", "{\"seconds\":5}");
+        String requestJson = """
+                {"type": "sleep", "payload": {"seconds": 5}}
+                """;
         MvcResult createResult = mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + userToken)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(createRequest)))
+                        .content(requestJson))
                 .andExpect(status().isCreated())
                 .andReturn();
 
@@ -145,11 +152,13 @@ class JobControllerIntegrationTest {
     @Test
     void getJob_otherUsersJob_returns404() throws Exception {
         // User1 creates a job
-        var createRequest = new CreateJobRequest("sleep", "{\"seconds\":5}");
+        String requestJson = """
+                {"type": "sleep", "payload": {"seconds": 5}}
+                """;
         MvcResult createResult = mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + userToken)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(createRequest)))
+                        .content(requestJson))
                 .andExpect(status().isCreated())
                 .andReturn();
 
@@ -172,24 +181,26 @@ class JobControllerIntegrationTest {
     @Test
     void listJobs_returnsOnlyOwnJobs() throws Exception {
         // User1 creates 2 jobs
-        var request = new CreateJobRequest("sleep", "{\"seconds\":5}");
+        String requestJson = """
+                {"type": "sleep", "payload": {"seconds": 5}}
+                """;
         mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + userToken)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(request)))
+                        .content(requestJson))
                 .andExpect(status().isCreated());
 
         mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + userToken)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(request)))
+                        .content(requestJson))
                 .andExpect(status().isCreated());
 
         // User2 creates 1 job
         mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + otherUserToken)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(request)))
+                        .content(requestJson))
                 .andExpect(status().isCreated());
 
         // User1 should only see their 2 jobs
