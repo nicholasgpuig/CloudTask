@@ -14,7 +14,7 @@ public class JobPublisher {
     }
 
     public void publishJobCreated(Job job) {
-        var message = new JobMessage(job.getId(), job.getType(), job.getPayload());
+        var message = new JobMessage(job.getId(), job.getType(), job.getPayload(), job.getUserId());
         rabbitTemplate.convertAndSend(RabbitConfig.JOBS_CREATED_QUEUE, message);
     }
 }

@@ -15,6 +15,10 @@ public class Job {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id", nullable = false)
+    private User user;
+
     @Column(nullable = false)
     private String type;
 
@@ -33,12 +37,15 @@ public class Job {
 
     public Job() {}
 
-    public Job(String type, String payload) {
+    public Job(String type, String payload, User user) {
         this.type = type;
         this.payload = payload;
+        this.user = user;
     }
 
     public UUID getId() { return id; }
+    public User getUser() { return user; }
+    public UUID getUserId() { return user != null ? user.getId() : null; }
     public String getType() { return type; }
     public String getPayload() { return payload; }
     public JobStatus getStatus() { return status; }
@@ -46,6 +53,7 @@ public class Job {
     public Instant getUpdatedAt() { return updatedAt; }
 
     public void setId(UUID id) { this.id = id; }
+    public void setUser(User user) { this.user = user; }
     public void setType(String type) { this.type = type; }
     public void setPayload(String payload) { this.payload = payload; }
     public void setStatus(JobStatus status) { this.status = status; }
