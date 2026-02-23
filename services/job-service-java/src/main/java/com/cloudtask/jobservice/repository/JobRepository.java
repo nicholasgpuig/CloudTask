@@ -9,7 +9,7 @@ import java.util.UUID;
 
 public interface JobRepository extends JpaRepository<Job, UUID> {
 
-    List<Job> findByUserIdOrderByCreatedAtDesc(UUID userId);
+    List<Job> findByUser_IdOrderByCreatedAtDesc(UUID userId);
 
-    Optional<Job> findByIdAndUserId(UUID id, UUID userId);
+    Optional<Job> findByIdAndUser_Id(UUID id, UUID userId);
 }

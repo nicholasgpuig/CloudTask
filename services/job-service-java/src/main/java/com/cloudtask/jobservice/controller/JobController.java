@@ -39,14 +39,14 @@ public class JobController {
     @GetMapping("/{id}")
     public JobResponse getJob(@PathVariable UUID id,
                               @AuthenticationPrincipal User user) {
-        var job = jobRepository.findByIdAndUserId(id, user.getId())
+        var job = jobRepository.findByIdAndUser_Id(id, user.getId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Job not found"));
         return JobResponse.from(job);
     }
 
     @GetMapping
     public List<JobResponse> listJobs(@AuthenticationPrincipal User user) {
-        return jobRepository.findByUserIdOrderByCreatedAtDesc(user.getId())
+        return jobRepository.findByUser_IdOrderByCreatedAtDesc(user.getId())
                 .stream()
                 .map(JobResponse::from)
                 .toList();
