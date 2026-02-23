@@ -51,6 +51,67 @@ open http://localhost:15672  # guest/guest
 open http://localhost:3000   # admin/admin
 ```
 
+## Authentication
+
+The job-service uses JWT-based authentication for secure access to job operations. All users must register or login to receive a JWT token, which is required for creating and managing jobs.
+
+### Registering a User
+
+```bash
+curl -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securePassword123"
+  }'
+```
+
+Response:
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+### Logging In
+
+```bash
+curl -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securePassword123"
+  }'
+```
+
+Response:
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+### Using the JWT Token
+
+Include the JWT token in the `Authorization` header with the `Bearer` scheme for all authenticated endpoints:
+
+```bash
+curl -X POST http://localhost:8080/jobs \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "email",
+    "payload": {"to": "recipient@example.com", "subject": "Hello"}
+  }'
+```
+
+### Security Notes
+
+- Passwords are hashed using BCrypt before storage
+- JWT tokens expire after a configured period
+- Jobs are scoped to users - each user can only access their own jobs
+- Tokens must be kept secure and should not be shared
+
 ## Project Structure
 
 ```
@@ -69,6 +130,25 @@ cloudtask/
 └── docs/
     └── architecture.md       # Architecture docs
 ```
+
+## API Endpoints
+
+### Authentication (No Auth Required)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/auth/register` | Register new user with email/password - returns JWT token |
+| POST | `/auth/login` | Login with email/password - returns JWT token |
+
+### Jobs (Auth Required - Bearer Token)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/jobs` | Create a new job (linked to authenticated user) |
+| GET | `/jobs` | List all jobs for the authenticated user |
+| GET | `/jobs/{id}` | Get a specific job by ID (only if owned by user) |
+
+**Note:** All job endpoints require authentication via JWT Bearer token. Jobs are user-scoped - users can only access jobs they created.
 
 ## Message Queues
 
