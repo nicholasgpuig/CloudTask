@@ -23,22 +23,28 @@ public class JobController {
     private final JobRepository jobRepository;
     private final JobPublisher jobPublisher;
     private final ObjectMapper objectMapper;
+    private final JobMetrics jobMetrics;
 
-    public JobController(JobRepository jobRepository, JobPublisher jobPublisher, ObjectMapper objectMapper) {
+    public JobController(JobRepository jobRepository, JobPublisher jobPublisher,
+                         ObjectMapper objectMapper, JobMetrics jobMetrics) {
         this.jobRepository = jobRepository;
         this.jobPublisher = jobPublisher;
         this.objectMapper = objectMapper;
+        this.jobMetrics = jobMetrics;
     }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public JobResponse createJob(@RequestBody CreateJobRequest request,
                                  @AuthenticationPrincipal User user) {
-        String payloadString = serializePayload(request.payload());
-        var job = new Job(request.type(), payloadString, user);
-        job = jobRepository.save(job);
-        jobPublisher.publishJobCreated(job);
-        return JobResponse.from(job);
+        return jobMetrics.jobCreationTimer(request.type()).record(() -> {
+            String payloadString = serializePayload(request.payload());
+            var job = new Job(request.type(), payloadString, user);
+            job = jobRepository.save(job);
+            jobPublisher.publishJobCreated(job);
+            jobMetrics.jobsCreatedCounter(request.type()).increment();
+            return JobResponse.from(job);
+        });
     }
 
     private String serializePayload(Object payload) {
