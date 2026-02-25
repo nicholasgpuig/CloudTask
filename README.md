@@ -29,7 +29,9 @@ This starts:
 - Redis (port 6379)
 - RabbitMQ (port 5672, management UI at 15672)
 - Prometheus (port 9090)
-- Grafana (port 3000)
+- Loki (port 3100)
+- Promtail (auto-discovers and ships container logs to Loki)
+- Grafana (port 3000, admin/admin)
 
 ### 2. Run Job Service
 
@@ -155,4 +157,28 @@ cloudtask/
 | Queue | Publisher | Consumer | Purpose |
 |-------|-----------|----------|---------|
 | `jobs.created` | job-service | worker | New jobs to process |
-| `jobs.completed` | worker | results-processor | Completed job results |
+| `jobs.started` | worker | results-processor | Job started status update |
+| `jobs.completed` | worker | results-processor | Job completed status update |
+
+## Observability
+
+Metrics and logs are collected automatically once infrastructure is running.
+
+**Dashboards & UIs:**
+
+| Tool | URL | Credentials |
+|------|-----|-------------|
+| Grafana | http://localhost:3000 | admin/admin |
+| Prometheus | http://localhost:9090 | — |
+| RabbitMQ | http://localhost:15672 | guest/guest |
+
+Grafana is pre-provisioned with two dashboards under the **CloudTask** folder:
+- **API Health** — HTTP request rates and latencies for the job-service
+- **Job Processing** — job throughput, duration, and status breakdown
+
+**Metrics endpoints** (for direct Prometheus queries):
+- job-service: `http://localhost:8080/actuator/prometheus`
+- worker: `http://localhost:9091/metrics`
+- results-processor: `http://localhost:9092/metrics`
+
+**Logs** are collected from all containers by Promtail and queryable in Grafana via the Loki data source. Filter by `container` label to isolate a specific service.

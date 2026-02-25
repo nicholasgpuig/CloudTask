@@ -76,6 +76,20 @@ The job-service package structure under `com.cloudtask.jobservice`:
 
 **Job payload:** The `payload` field on `Job` is stored as a serialized JSON string (not a JSON column). The worker deserializes it per job type.
 
+## Observability
+
+**Metrics stack:** Prometheus scrapes all three services every 15 seconds.
+- job-service uses Micrometer (`JobMetrics.java`) — exposes custom counters/timers at `/actuator/prometheus` (port 8080). Spring's HTTP request metrics are auto-collected with percentile histograms enabled.
+- worker-go and results-processor-go use the Prometheus Go client — each runs a separate `/metrics` HTTP server (ports 9091 and 9092 respectively).
+
+**Logging stack:** All services log structured JSON to stdout. Promtail auto-discovers containers via the Docker socket and ships logs to Loki, where they are queryable in Grafana by `container` label.
+- job-service uses Logback with ECS JSON format (configured in `logback-spring.xml`; plain text in test profile).
+- Go services use `slog.NewJSONHandler`.
+
+**Grafana dashboards** are fully provisioned from `deploy/compose/grafana/provisioning/` — no manual setup needed. Dashboards live under the **CloudTask** folder (API Health, Job Processing). Data sources (Prometheus, Loki) are non-editable.
+
+**Infrastructure ports:** Prometheus (9090), Loki (3100), Grafana (3000, admin/admin).
+
 ## Testing
 
 Integration tests use the `test` Spring profile (`application-test.properties`), which swaps PostgreSQL for H2 in-memory and excludes RabbitMQ auto-configuration. `JobPublisher` is mocked with `@MockitoBean`.
