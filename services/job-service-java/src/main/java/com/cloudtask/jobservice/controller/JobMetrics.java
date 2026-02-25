@@ -25,6 +25,7 @@ public class JobMetrics {
         return Timer.builder("jobs.created.seconds")
                 .tag("type", type)
                 .description("Job creation latency by type")
+                .publishPercentileHistogram(true)
                 .register(registry);
     }
 }
