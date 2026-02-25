@@ -53,3 +53,8 @@ docker-compose.override.yml
 # Temporary
 tmp/
 temp/
+
+# Executables
+worker
+results-processor
+scheduler

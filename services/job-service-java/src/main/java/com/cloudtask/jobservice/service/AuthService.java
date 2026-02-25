@@ -6,6 +6,7 @@ import com.cloudtask.jobservice.dto.RegisterRequest;
 import com.cloudtask.jobservice.model.User;
 import com.cloudtask.jobservice.repository.UserRepository;
 import com.cloudtask.jobservice.security.JwtUtil;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -21,16 +22,19 @@ public class AuthService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
+    private final MeterRegistry meterRegistry;
 
     @Value("${jwt.expiration-ms:3600000}")
     private long expirationMs;
 
     public AuthService(UserRepository userRepository,
                        PasswordEncoder passwordEncoder,
-                       JwtUtil jwtUtil) {
+                       JwtUtil jwtUtil,
+                       MeterRegistry meterRegistry) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtUtil = jwtUtil;
+        this.meterRegistry = meterRegistry;
     }
 
     @Transactional
@@ -42,17 +46,23 @@ public class AuthService {
         var user = new User(request.email(), passwordEncoder.encode(request.password()));
         user = userRepository.save(user);
 
+        meterRegistry.counter("auth.registrations.total").increment();
         return generateTokenResponse(user);
     }
 
     public AuthResponse login(LoginRequest request) {
         var user = userRepository.findByEmail(request.email())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials"));
+                .orElseThrow(() -> {
+                    meterRegistry.counter("auth.logins.total", "outcome", "failure").increment();
+                    return new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials");
+                });
 
         if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+            meterRegistry.counter("auth.logins.total", "outcome", "failure").increment();
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials");
         }
 
+        meterRegistry.counter("auth.logins.total", "outcome", "success").increment();
         return generateTokenResponse(user);
     }
 
