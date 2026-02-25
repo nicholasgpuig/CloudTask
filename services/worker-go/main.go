@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -29,37 +33,64 @@ type StatusUpdate struct {
 	Result string `json:"result,omitempty"`
 }
 
+var (
+	jobsProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "worker_jobs_processed_total",
+		Help: "Total jobs processed by the worker",
+	}, []string{"type", "status"})
+
+	jobDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "worker_job_duration_seconds",
+		Help:    "Job execution duration in seconds",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"type"})
+)
+
 func main() {
-	log.Println("CloudTask Worker starting...")
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
+	slog.Info("CloudTask Worker starting")
+
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		slog.Info("metrics server listening", "port", 9091)
+		if err := http.ListenAndServe(":9091", mux); err != nil {
+			slog.Error("metrics server error", "error", err)
+		}
+	}()
 
 	rabbitURL := envOr("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
 
 	conn, err := amqp.Dial(rabbitURL)
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		slog.Error("failed to connect to RabbitMQ", "error", err)
+		os.Exit(1)
 	}
 	defer conn.Close()
 
 	ch, err := conn.Channel()
 	if err != nil {
-		log.Fatalf("Failed to open channel: %v", err)
+		slog.Error("failed to open channel", "error", err)
+		os.Exit(1)
 	}
 	defer ch.Close()
 
-	// Declare queues
 	for _, q := range []string{"jobs.created", "jobs.started", "jobs.completed"} {
 		_, err := ch.QueueDeclare(q, true, false, false, false, nil)
 		if err != nil {
-			log.Fatalf("Failed to declare queue %s: %v", q, err)
+			slog.Error("failed to declare queue", "queue", q, "error", err)
+			os.Exit(1)
 		}
 	}
 
 	msgs, err := ch.Consume("jobs.created", "", false, false, false, false, nil)
 	if err != nil {
-		log.Fatalf("Failed to register consumer: %v", err)
+		slog.Error("failed to register consumer", "error", err)
+		os.Exit(1)
 	}
 
-	log.Println("Waiting for jobs...")
+	slog.Info("waiting for jobs")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -68,7 +99,7 @@ func main() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
-		log.Println("Shutting down...")
+		slog.Info("shutting down")
 		cancel()
 	}()
 
@@ -88,23 +119,27 @@ func main() {
 func processJob(ch *amqp.Channel, msg amqp.Delivery) {
 	var job JobMessage
 	if err := json.Unmarshal(msg.Body, &job); err != nil {
-		log.Printf("Failed to parse job message: %v", err)
+		slog.Error("failed to parse job message", "error", err)
 		msg.Nack(false, false)
 		return
 	}
 
-	log.Printf("Received job %s (type: %s)", job.JobID, job.Type)
+	slog.Info("received job", "jobId", job.JobID, "type", job.Type)
 
-	// Publish started status
 	publish(ch, "jobs.started", StatusUpdate{
 		JobID:  job.JobID,
 		Status: "RUNNING",
 	})
 
-	// Execute the job
+	start := time.Now()
 	result, err := executeJob(job)
+	elapsed := time.Since(start)
+
+	jobDuration.WithLabelValues(job.Type).Observe(elapsed.Seconds())
+
 	if err != nil {
-		log.Printf("Job %s failed: %v", job.JobID, err)
+		slog.Error("job failed", "jobId", job.JobID, "type", job.Type, "duration_ms", elapsed.Milliseconds(), "error", err)
+		jobsProcessed.WithLabelValues(job.Type, "FAILED").Inc()
 		publish(ch, "jobs.completed", StatusUpdate{
 			JobID:  job.JobID,
 			Status: "FAILED",
@@ -114,7 +149,8 @@ func processJob(ch *amqp.Channel, msg amqp.Delivery) {
 		return
 	}
 
-	log.Printf("Job %s completed: %s", job.JobID, result)
+	slog.Info("job completed", "jobId", job.JobID, "type", job.Type, "duration_ms", elapsed.Milliseconds(), "result", result)
+	jobsProcessed.WithLabelValues(job.Type, "COMPLETED").Inc()
 	publish(ch, "jobs.completed", StatusUpdate{
 		JobID:  job.JobID,
 		Status: "COMPLETED",
@@ -133,7 +169,7 @@ func executeJob(job JobMessage) (string, error) {
 		if p.Seconds <= 0 || p.Seconds > 300 {
 			return "", fmt.Errorf("seconds must be between 1 and 300, got %d", p.Seconds)
 		}
-		log.Printf("Sleeping for %d seconds...", p.Seconds)
+		slog.Info("sleeping", "seconds", p.Seconds)
 		time.Sleep(time.Duration(p.Seconds) * time.Second)
 		return fmt.Sprintf("Slept for %d seconds", p.Seconds), nil
 	default:
@@ -144,7 +180,7 @@ func executeJob(job JobMessage) (string, error) {
 func publish(ch *amqp.Channel, queue string, msg any) {
 	body, err := json.Marshal(msg)
 	if err != nil {
-		log.Printf("Failed to marshal message: %v", err)
+		slog.Error("failed to marshal message", "error", err)
 		return
 	}
 	err = ch.PublishWithContext(context.Background(), "", queue, false, false, amqp.Publishing{
@@ -152,7 +188,7 @@ func publish(ch *amqp.Channel, queue string, msg any) {
 		Body:        body,
 	})
 	if err != nil {
-		log.Printf("Failed to publish to %s: %v", queue, err)
+		slog.Error("failed to publish", "queue", queue, "error", err)
 	}
 }
 

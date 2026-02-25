@@ -3,12 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -18,56 +23,89 @@ type StatusUpdate struct {
 	Result string `json:"result,omitempty"`
 }
 
+var (
+	statusUpdates = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "processor_status_updates_total",
+		Help: "Total status updates processed by the results processor",
+	}, []string{"status"})
+
+	dbUpdateDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "processor_db_update_duration_seconds",
+		Help:    "Duration of database update operations",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	nackTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "processor_nack_total",
+		Help: "Total messages nacked by the results processor",
+	})
+)
+
 func main() {
-	log.Println("CloudTask Results Processor starting...")
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
+	slog.Info("CloudTask Results Processor starting")
+
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		slog.Info("metrics server listening", "port", 9092)
+		if err := http.ListenAndServe(":9092", mux); err != nil {
+			slog.Error("metrics server error", "error", err)
+		}
+	}()
 
 	rabbitURL := envOr("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
 	dbURL := envOr("DATABASE_URL", "postgres://cloudtask:cloudtask@localhost:5432/cloudtask")
 
-	// Connect to PostgreSQL
 	dbPool, err := pgxpool.New(context.Background(), dbURL)
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		slog.Error("failed to connect to database", "error", err)
+		os.Exit(1)
 	}
 	defer dbPool.Close()
 
 	if err := dbPool.Ping(context.Background()); err != nil {
-		log.Fatalf("Failed to ping database: %v", err)
+		slog.Error("failed to ping database", "error", err)
+		os.Exit(1)
 	}
-	log.Println("Connected to PostgreSQL")
+	slog.Info("connected to PostgreSQL")
 
-	// Connect to RabbitMQ
 	conn, err := amqp.Dial(rabbitURL)
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		slog.Error("failed to connect to RabbitMQ", "error", err)
+		os.Exit(1)
 	}
 	defer conn.Close()
 
 	ch, err := conn.Channel()
 	if err != nil {
-		log.Fatalf("Failed to open channel: %v", err)
+		slog.Error("failed to open channel", "error", err)
+		os.Exit(1)
 	}
 	defer ch.Close()
 
-	// Declare queues
 	for _, q := range []string{"jobs.started", "jobs.completed"} {
 		_, err := ch.QueueDeclare(q, true, false, false, false, nil)
 		if err != nil {
-			log.Fatalf("Failed to declare queue %s: %v", q, err)
+			slog.Error("failed to declare queue", "queue", q, "error", err)
+			os.Exit(1)
 		}
 	}
 
 	startedMsgs, err := ch.Consume("jobs.started", "results-started", false, false, false, false, nil)
 	if err != nil {
-		log.Fatalf("Failed to consume jobs.started: %v", err)
+		slog.Error("failed to consume jobs.started", "error", err)
+		os.Exit(1)
 	}
 
 	completedMsgs, err := ch.Consume("jobs.completed", "results-completed", false, false, false, false, nil)
 	if err != nil {
-		log.Fatalf("Failed to consume jobs.completed: %v", err)
+		slog.Error("failed to consume jobs.completed", "error", err)
+		os.Exit(1)
 	}
 
-	log.Println("Waiting for status updates...")
+	slog.Info("waiting for status updates")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -76,7 +114,7 @@ func main() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
-		log.Println("Shutting down...")
+		slog.Info("shutting down")
 		cancel()
 	}()
 
@@ -101,23 +139,30 @@ func main() {
 func handleStatusUpdate(ctx context.Context, db *pgxpool.Pool, msg amqp.Delivery) {
 	var update StatusUpdate
 	if err := json.Unmarshal(msg.Body, &update); err != nil {
-		log.Printf("Failed to parse message: %v", err)
+		slog.Error("failed to parse message", "error", err)
+		nackTotal.Inc()
 		msg.Nack(false, false)
 		return
 	}
 
-	log.Printf("Updating job %s to %s", update.JobID, update.Status)
+	slog.Info("updating job status", "jobId", update.JobID, "status", update.Status)
 
+	start := time.Now()
 	_, err := db.Exec(ctx,
 		"UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2",
 		update.Status, update.JobID,
 	)
+	elapsed := time.Since(start)
+	dbUpdateDuration.Observe(elapsed.Seconds())
+
 	if err != nil {
-		log.Printf("Failed to update job %s: %v", update.JobID, err)
+		slog.Error("failed to update job", "jobId", update.JobID, "status", update.Status, "error", err)
+		nackTotal.Inc()
 		msg.Nack(false, true)
 		return
 	}
 
+	statusUpdates.WithLabelValues(update.Status).Inc()
 	msg.Ack(false)
 }
 
