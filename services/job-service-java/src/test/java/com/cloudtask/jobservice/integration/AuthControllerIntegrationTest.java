@@ -4,6 +4,8 @@ import com.cloudtask.jobservice.dto.LoginRequest;
 import com.cloudtask.jobservice.dto.RegisterRequest;
 import com.cloudtask.jobservice.messaging.JobPublisher;
 import com.cloudtask.jobservice.repository.UserRepository;
+import com.cloudtask.jobservice.service.IdempotencyService;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,6 +38,12 @@ class AuthControllerIntegrationTest {
 
     @MockitoBean
     private JobPublisher jobPublisher;
+
+    @MockitoBean
+    private RedisConnectionFactory redisConnectionFactory;
+
+    @MockitoBean
+    private IdempotencyService idempotencyService;
 
     @BeforeEach
     void setUp() {

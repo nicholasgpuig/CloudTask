@@ -6,11 +6,13 @@ import com.cloudtask.jobservice.messaging.JobPublisher;
 import com.cloudtask.jobservice.model.Job;
 import com.cloudtask.jobservice.repository.JobRepository;
 import com.cloudtask.jobservice.repository.UserRepository;
+import com.cloudtask.jobservice.service.IdempotencyService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -19,8 +21,12 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 
+import java.util.Optional;
+import java.util.UUID;
+
 import static org.hamcrest.Matchers.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.verify;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -46,6 +52,12 @@ class JobControllerIntegrationTest {
     @MockitoBean
     private JobPublisher jobPublisher;
 
+    @MockitoBean
+    private RedisConnectionFactory redisConnectionFactory;
+
+    @MockitoBean
+    private IdempotencyService idempotencyService;
+
     private String userToken;
     private String otherUserToken;
 
@@ -59,11 +71,13 @@ class JobControllerIntegrationTest {
         jobRepository.deleteAll();
         userRepository.deleteAll();
 
-        // Create first user and get token
         userToken = registerAndGetToken("user1@example.com", "password123");
-
-        // Create second user and get token
         otherUserToken = registerAndGetToken("user2@example.com", "password123");
+
+        // Default happy-path behavior: valid key, no cached value, reserve succeeds
+        given(idempotencyService.extractKey(any())).willReturn(Optional.of(UUID.randomUUID().toString()));
+        given(idempotencyService.get(any(), any())).willReturn(null);
+        given(idempotencyService.reserve(any(), any())).willReturn(true);
     }
 
     private String registerAndGetToken(String email, String password) throws Exception {
@@ -83,65 +97,118 @@ class JobControllerIntegrationTest {
 
     @Test
     void createJob_authenticated_success() throws Exception {
-        String requestJson = """
-                {"type": "sleep", "payload": {"seconds": 5}}
-                """;
-
         mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + userToken)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(requestJson))
+                        .content("""
+                                {"type": "sleep", "payload": {"seconds": 5}}
+                                """))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.id").isNotEmpty())
                 .andExpect(jsonPath("$.type").value("sleep"))
                 .andExpect(jsonPath("$.status").value("PENDING"));
 
-        // Verify job was published to RabbitMQ
         verify(jobPublisher).publishJobCreated(any(Job.class));
     }
 
     @Test
     void createJob_noToken_returns403() throws Exception {
-        String requestJson = """
-                {"type": "sleep", "payload": {"seconds": 5}}
-                """;
-
         mockMvc.perform(post("/jobs")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(requestJson))
+                        .content("""
+                                {"type": "sleep", "payload": {"seconds": 5}}
+                                """))
                 .andExpect(status().isForbidden());
     }
 
     @Test
     void createJob_invalidToken_returns401() throws Exception {
-        String requestJson = """
-                {"type": "sleep", "payload": {"seconds": 5}}
-                """;
-
         mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer invalid.token.here")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(requestJson))
+                        .content("""
+                                {"type": "sleep", "payload": {"seconds": 5}}
+                                """))
                 .andExpect(status().isUnauthorized());
     }
 
     @Test
-    void getJob_ownJob_success() throws Exception {
-        // Create a job first
-        String requestJson = """
-                {"type": "sleep", "payload": {"seconds": 5}}
-                """;
-        MvcResult createResult = mockMvc.perform(post("/jobs")
+    void createJob_missingIdempotencyKey_returns400() throws Exception {
+        given(idempotencyService.extractKey(any())).willReturn(Optional.empty());
+
+        mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + userToken)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(requestJson))
+                        .content("""
+                                {"type": "sleep", "payload": {"seconds": 5}}
+                                """))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void createJob_processingKey_returns409() throws Exception {
+        given(idempotencyService.get(any(), any())).willReturn("PROCESSING");
+
+        mockMvc.perform(post("/jobs")
+                        .header("Authorization", "Bearer " + userToken)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"type": "sleep", "payload": {"seconds": 5}}
+                                """))
+                .andExpect(status().isConflict());
+    }
+
+    @Test
+    void createJob_reserveFails_returns409() throws Exception {
+        given(idempotencyService.reserve(any(), any())).willReturn(false);
+
+        mockMvc.perform(post("/jobs")
+                        .header("Authorization", "Bearer " + userToken)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"type": "sleep", "payload": {"seconds": 5}}
+                                """))
+                .andExpect(status().isConflict());
+    }
+
+    @Test
+    void createJob_cachedResponse_returnsCachedJob() throws Exception {
+        String jobId = UUID.randomUUID().toString();
+        String cachedJson = """
+                {"id":"%s","type":"sleep","payload":"{\\"seconds\\":5}","status":"PENDING","createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"}
+                """.formatted(jobId);
+        given(idempotencyService.get(any(), any())).willReturn(cachedJson);
+
+        mockMvc.perform(post("/jobs")
+                        .header("Authorization", "Bearer " + userToken)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"type": "sleep", "payload": {"seconds": 5}}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").value(jobId))
+                .andExpect(jsonPath("$.status").value("PENDING"));
+    }
+
+    @Test
+    void getJob_ownJob_success() throws Exception {
+        MvcResult createResult = mockMvc.perform(post("/jobs")
+                        .header("Authorization", "Bearer " + userToken)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"type": "sleep", "payload": {"seconds": 5}}
+                                """))
                 .andExpect(status().isCreated())
                 .andReturn();
 
         String jobId = objectMapper.readTree(createResult.getResponse().getContentAsString())
                 .get("id").asText();
 
-        // Fetch the job
         mockMvc.perform(get("/jobs/" + jobId)
                         .header("Authorization", "Bearer " + userToken))
                 .andExpect(status().isOk())
@@ -151,21 +218,19 @@ class JobControllerIntegrationTest {
 
     @Test
     void getJob_otherUsersJob_returns404() throws Exception {
-        // User1 creates a job
-        String requestJson = """
-                {"type": "sleep", "payload": {"seconds": 5}}
-                """;
         MvcResult createResult = mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + userToken)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(requestJson))
+                        .content("""
+                                {"type": "sleep", "payload": {"seconds": 5}}
+                                """))
                 .andExpect(status().isCreated())
                 .andReturn();
 
         String jobId = objectMapper.readTree(createResult.getResponse().getContentAsString())
                 .get("id").asText();
 
-        // User2 tries to fetch User1's job - should get 404 (not 403, to prevent enumeration)
         mockMvc.perform(get("/jobs/" + jobId)
                         .header("Authorization", "Bearer " + otherUserToken))
                 .andExpect(status().isNotFound());
@@ -180,36 +245,36 @@ class JobControllerIntegrationTest {
 
     @Test
     void listJobs_returnsOnlyOwnJobs() throws Exception {
-        // User1 creates 2 jobs
         String requestJson = """
                 {"type": "sleep", "payload": {"seconds": 5}}
                 """;
+
         mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + userToken)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestJson))
                 .andExpect(status().isCreated());
 
         mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + userToken)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestJson))
                 .andExpect(status().isCreated());
 
-        // User2 creates 1 job
         mockMvc.perform(post("/jobs")
                         .header("Authorization", "Bearer " + otherUserToken)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestJson))
                 .andExpect(status().isCreated());
 
-        // User1 should only see their 2 jobs
         mockMvc.perform(get("/jobs")
                         .header("Authorization", "Bearer " + userToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(2)));
 
-        // User2 should only see their 1 job
         mockMvc.perform(get("/jobs")
                         .header("Authorization", "Bearer " + otherUserToken))
                 .andExpect(status().isOk())
