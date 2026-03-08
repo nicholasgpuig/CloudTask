@@ -90,6 +90,13 @@ The job-service package structure under `com.cloudtask.jobservice`:
 
 **Infrastructure ports:** Prometheus (9090), Loki (3100), Grafana (3000, admin/admin).
 
+## Spring Boot Version
+
+This project uses **Spring Boot 4.0.2**, which is beyond Claude's training data. When working with any Spring-specific or Jackson/ObjectMapper code, fetch the relevant docs before making changes:
+
+- Spring Boot 4.0 migration guide: https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide
+- Spring Framework 7 upgrade notes: https://github.com/spring-projects/spring-framework/wiki/Upgrading-to-Spring-Framework-7.x
+
 ## Testing
 
 Integration tests use the `test` Spring profile (`application-test.properties`), which swaps PostgreSQL for H2 in-memory and excludes RabbitMQ auto-configuration. `JobPublisher` is mocked with `@MockitoBean`.
