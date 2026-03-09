@@ -1,4 +1,37 @@
 services:
+  results-processor:
+    build:
+      context: ../../services/results-processor-go
+      dockerfile: Dockerfile
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DATABASE_URL: postgres://cloudtask:cloudtask@postgres:5432/cloudtask
+      METRICS_PORT: "9092"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    deploy:
+      replicas: 5
+    networks:
+      - cloudtask
+
+  worker:
+    build:
+      context: ../../services/worker-go
+      dockerfile: Dockerfile
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      METRICS_PORT: "9091"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      replicas: 8
+    networks:
+      - cloudtask
+
   postgres:
     image: postgres:16-alpine
     container_name: cloudtask-postgres
