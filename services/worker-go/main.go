@@ -92,8 +92,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	err = ch.ExchangeDeclare("cloudtask.dlx", "direct", true, false, false, false, nil)
+	if err != nil {
+		slog.Error("failed to declare dead letter exchange", "error", err)
+		os.Exit(1)
+	}
+
+	_, err = ch.QueueDeclare("jobs.dead-letter", true, false, false, false, nil)
+	if err != nil {
+		slog.Error("failed to declare dead-letter queue", "error", err)
+		os.Exit(1)
+	}
+
+	err = ch.QueueBind("jobs.dead-letter",
+		"jobs.dead-letter", // routing key - x-dead-letter-routing-key
+		"cloudtask.dlx",
+		false, nil)
+	if err != nil {
+		slog.Error("failed to bind queue dead-letter queue", "error", err)
+		os.Exit(1)
+	}
+
 	for _, q := range []string{"jobs.created", "jobs.started", "jobs.completed"} {
-		_, err := ch.QueueDeclare(q, true, false, false, false, nil)
+		_, err := ch.QueueDeclare(q, true, false, false, false, 
+		amqp.Table{
+			"x-dead-letter-exchange": "cloudtask.dlx",
+			"x-dead-letter-routing-key": "jobs.dead-letter",
+		},)
 		if err != nil {
 			slog.Error("failed to declare queue", "queue", q, "error", err)
 			os.Exit(1)

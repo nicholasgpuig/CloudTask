@@ -186,6 +186,33 @@ curl -X POST http://localhost:8080/jobs \
 
 Keys expire after 24 hours. A new key must be generated for each distinct job submission.
 
+## Resetting State
+
+Useful for testing or starting fresh.
+
+**Clear PostgreSQL data only** (keeps schema):
+```bash
+docker exec cloudtask-postgres psql -U cloudtask -d cloudtask -c "TRUNCATE jobs, users CASCADE;"
+```
+
+**Clear Redis** (idempotency keys):
+```bash
+docker exec cloudtask-redis redis-cli FLUSHDB
+```
+
+**Purge RabbitMQ queues** (leaves queues declared, empties messages):
+```bash
+for q in jobs.created jobs.started jobs.completed jobs.dead-letter; do
+  curl -s -u guest:guest -X DELETE "http://localhost:15672/api/queues/%2F/$q/contents"
+done
+```
+
+**Full reset** — wipes all volumes, cleanest option:
+```bash
+cd deploy/compose && docker compose down -v && docker compose up -d
+```
+Spring Boot recreates the schema on next startup (`ddl-auto=update`).
+
 ## Message Queues
 
 | Queue | Publisher | Consumer | Purpose |
