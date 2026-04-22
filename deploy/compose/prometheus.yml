@@ -13,9 +13,15 @@ scrape_configs:
       - targets: ['host.docker.internal:8080']
 
   - job_name: 'worker'
-    static_configs:
-      - targets: ['host.docker.internal:9091']
+    dns_sd_configs:
+      - names:
+          - 'worker'
+        type: 'A'
+        port: 9091
 
   - job_name: 'results-processor'
-    static_configs:
-      - targets: ['host.docker.internal:9092']
+    dns_sd_configs:
+      - names:
+          - 'results-processor'
+        type: 'A'
+        port: 9092

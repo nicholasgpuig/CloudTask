@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -47,15 +50,20 @@ var (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	workerID := envOr("WORKER_ID", uuid.New().String()[:8])
+	metricsPort := envOr("METRICS_PORT", "9091")
+	concurrency := envOrInt("CONCURRENCY", 50) // Number of goroutines per worker
 
-	slog.Info("CloudTask Worker starting")
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{})).With("worker_id", workerID)
+	slog.SetDefault(logger)
+
+	slog.Info("CloudTask Worker starting", "concurrency", concurrency)
 
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.Handler())
-		slog.Info("metrics server listening", "port", 9091)
-		if err := http.ListenAndServe(":9091", mux); err != nil {
+		slog.Info("metrics server listening", "port", metricsPort)
+		if err := http.ListenAndServe(":"+metricsPort, mux); err != nil {
 			slog.Error("metrics server error", "error", err)
 		}
 	}()
@@ -76,6 +84,14 @@ func main() {
 	}
 	defer ch.Close()
 
+	// Prefetch limit: only fetch up to `concurrency` unacked messages at a time.
+	// This ensures fair distribution across workers and prevents one worker
+	// from grabbing all messages while others sit idle.
+	if err := ch.Qos(concurrency, 0, false); err != nil {
+		slog.Error("failed to set QoS", "error", err)
+		os.Exit(1)
+	}
+
 	for _, q := range []string{"jobs.created", "jobs.started", "jobs.completed"} {
 		_, err := ch.QueueDeclare(q, true, false, false, false, nil)
 		if err != nil {
@@ -93,25 +109,49 @@ func main() {
 	slog.Info("waiting for jobs")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
-		slog.Info("shutting down")
+		slog.Info("shutting down, waiting for in-flight jobs to complete...")
 		cancel()
 	}()
+
+	// WaitGroup tracks all in-flight goroutines so we can wait for them on shutdown
+	var wg sync.WaitGroup
+
+	// Semaphore pattern: buffered channel limits concurrent goroutines.
+	// Think of it as a pool of 50 "tickets" - a goroutine must grab a ticket
+	// to start work, and returns it when done.
+	sem := make(chan struct{}, concurrency)
 
 	for {
 		select {
 		case <-ctx.Done():
+			// Stop accepting new jobs, wait for in-flight ones to finish
+			slog.Info("waiting for in-flight jobs to complete")
+			wg.Wait()
+			slog.Info("all jobs completed, exiting")
 			return
+
 		case msg, ok := <-msgs:
 			if !ok {
+				wg.Wait()
 				return
 			}
-			processJob(ch, msg)
+
+			// Acquire semaphore slot (blocks if all 50 slots are in use)
+			sem <- struct{}{}
+			wg.Add(1)
+
+			// Launch goroutine to process job concurrently
+			go func(m amqp.Delivery) {
+				defer wg.Done()
+				defer func() { <-sem }() // Release semaphore slot when done
+
+				processJob(ch, m)
+			}(msg)
 		}
 	}
 }
@@ -195,6 +235,15 @@ func publish(ch *amqp.Channel, queue string, msg any) {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envOrInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
 	}
 	return fallback
 }
